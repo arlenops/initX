@@ -1,86 +1,122 @@
 #!/usr/bin/env bash
-set -euo pipefail
+#
+# initx 共享函数库，提供 UI 样式、模块加载等通用能力。
 
-# ===== 文件操作 =====
-# 备份文件（如果存在）
-backup_file() {
-  local file="$1"
-  if [ -f "$file" ]; then
-    local bak="${file}.bak.$(date +%s)"
-    sudo cp -a "$file" "$bak"
-    echo "🗂 已备份文件：$file → $bak"
-  fi
-}
+if [[ -n "${INITX_LIB_SOURCED:-}" ]]; then
+  return
+fi
+INITX_LIB_SOURCED=1
 
-# 恢复最近的备份（可选）
-restore_latest_backup() {
-  local file="$1"
-  local bak
-  bak="$(ls -t "${file}".bak.* 2>/dev/null | head -n 1 || true)"
-  if [ -n "$bak" ]; then
-    sudo cp -a "$bak" "$file"
-    echo "✅ 已从备份恢复：$file"
+readonly COLOR_RESET=$'\033[0m'
+readonly COLOR_PRIMARY=$'\033[38;5;80m'
+readonly COLOR_SECONDARY=$'\033[38;5;111m'
+readonly COLOR_HILIGHT=$'\033[38;5;156m'
+readonly COLOR_WARNING=$'\033[38;5;203m'
+
+pad_display_width() {
+  local text=$1
+  local width=$2
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$text" "$width" <<'PY'
+import sys
+import unicodedata
+
+text = sys.argv[1]
+width = int(sys.argv[2])
+
+def display_width(s):
+    total = 0
+    for ch in s:
+        if unicodedata.east_asian_width(ch) in ('F', 'W', 'A'):
+            total += 2
+        else:
+            total += 1
+    return total
+
+current = display_width(text)
+padding = max(width - current, 0)
+sys.stdout.write(text + ' ' * padding)
+PY
   else
-    echo "⚠️ 未找到 $file 的备份"
+    local current=${#text}
+    local padding=$((width - current))
+    ((padding < 0)) && padding=0
+    printf '%s%*s' "${text}" "${padding}" ''
   fi
 }
 
-# ===== 权限 & 环境 =====
-# 检查 root 权限
-need_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ 此操作需要 root 权限"
-    exit 1
-  fi
+print_box_line() {
+  local text=$1
+  local padded
+  padded=$(pad_display_width "${text}" 38)
+
+  printf '%s|%s ' "${COLOR_PRIMARY}" "${COLOR_RESET}"
+  printf '%s%s%s' "${COLOR_HILIGHT}" "${padded}" "${COLOR_RESET}"
+  printf ' %s|%s\n' "${COLOR_PRIMARY}" "${COLOR_RESET}"
 }
 
-# 检查命令是否存在
-has_cmd() {
-  command -v "$1" >/dev/null 2>&1
+print_menu_option() {
+  local index=$1
+  local text=$2
+  local label
+  printf -v label '%2d > %s' "${index}" "${text}"
+  local padded
+  padded=$(pad_display_width "${label}" 38)
+
+  printf '%s|%s ' "${COLOR_PRIMARY}" "${COLOR_RESET}"
+  printf '%s%s%s' "${COLOR_SECONDARY}" "${padded}" "${COLOR_RESET}"
+  printf ' %s|%s\n' "${COLOR_PRIMARY}" "${COLOR_RESET}"
 }
 
-# 判断发行版
-detect_os() {
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    echo "$ID"
+cleanup_cursor() {
+  printf '\033[?25h' || true
+}
+
+clear_screen() {
+  printf '\033c'
+}
+
+slow_print() {
+  local text=$1
+  local delay=${2:-0.013}
+  local char
+  for ((i = 0; i < ${#text}; i++)); do
+    char=${text:i:1}
+    printf '%s' "${char}"
+    sleep "${delay}"
+  done
+  printf '\n'
+}
+
+prompt_to_continue() {
+  local message=${1:-$'\033[38;5;111m按下回车返回菜单...\033[0m'}
+  read -rp "${message}" _
+  printf '\n'
+}
+
+load_feature_modules() {
+  local base_dir=$1
+  shift || true
+  local patterns=("$@")
+
+  if [[ ${#patterns[@]} -eq 0 ]]; then
+    patterns=("${base_dir}"/*.sh)
   else
-    uname -s | tr '[:upper:]' '[:lower:]'
+    local expanded=()
+    local pattern
+    for pattern in "${patterns[@]}"; do
+      expanded+=("${base_dir}/${pattern}")
+    done
+    patterns=("${expanded[@]}")
   fi
-}
 
-# 简单检测网络连通性
-is_online() {
-  ping -c1 -W1 8.8.8.8 >/dev/null 2>&1
-}
-
-# ===== 命令安全执行包装 =====
-# 带提示的安全执行（失败会退出）
-safe_exec() {
-  local desc="$1"; shift
-  echo "▶️ $desc..."
-  if "$@"; then
-    echo "✅ 完成：$desc"
-  else
-    echo "❌ 失败：$desc"
-    exit 1
-  fi
-}
-
-# ===== 小工具函数 =====
-timestamp() {
-  date '+%Y%m%d-%H%M%S'
-}
-
-trim() {
-  # 去除字符串前后空格
-  local var="$*"
-  var="${var#"${var%%[![:space:]]*}"}"
-  var="${var%"${var##*[![:space:]]}"}"
-  echo -n "$var"
-}
-
-rand_str() {
-  local len="${1:-8}"
-  tr -dc A-Za-z0-9 </dev/urandom | head -c "$len"
+  shopt -s nullglob
+  local module
+  for module in "${patterns[@]}"; do
+    [[ -f "${module}" ]] || continue
+    # shellcheck source=/dev/null
+    source "${module}"
+  done
+  shopt -u nullglob
 }
